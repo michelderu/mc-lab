@@ -1,0 +1,124 @@
+# Medusa backup storage — lab MinIO (requires medusa-bucket-key in database).
+apiVersion: medusa.k8ssandra.io/v1alpha1
+kind: MedusaConfiguration
+metadata:
+  name: database-backup
+  namespace: database
+spec:
+  storageProperties:
+    storageProvider: s3_compatible
+    bucketName: medusa-backups
+    region: us-east-1
+    host: mission-control-minio.mission-control.svc.cluster.local
+    port: 9000
+    secure: false
+    sslVerify: false
+    storageSecretRef:
+      name: medusa-bucket-key
+---
+# Mission Control cluster for two-dcs lab.
+apiVersion: missioncontrol.datastax.com/v1beta2
+kind: MissionControlCluster
+metadata:
+  name: two-dcs
+  namespace: database
+spec:
+  createIssuer: true
+  # dataApi: {} enables Data API (Stargate) for this cluster. Omit to disable.
+  dataApi: {}
+  encryption:
+    internodeEncryption:
+      certs:
+        createCerts: true
+      enabled: true
+  k8ssandra:
+    auth: true
+    cassandra:
+      config:
+        jvmOptions:
+          # Lab tuning
+          gc: G1GC
+          heapSize: 512Mi
+      serverType: hcd
+      serverVersion: "1.2.5"
+      superuserSecretRef:
+        name: superuser
+      storageConfig:
+        cassandraDataVolumeClaimSpec:
+          storageClassName: standard
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            # Lab tuning
+            requests:
+              storage: 2Gi
+      resources:
+        # Lab tuning
+        requests:
+          cpu: 500m
+          memory: 1280Mi
+        limits:
+          cpu: "2"
+          memory: 1536Mi
+      datacenters:
+        # metadata.name = CassandraDatacenter CR (pods: dc1-rack1-sts-0). datacenterName = ring name (nodetool, replication).
+        - metadata:
+            name: dc1
+          datacenterName: dc1
+          size: 3
+          racks:
+            - name: rack1
+              nodeAffinityLabels:
+                mission-control.datastax.com/role: database
+                topology.kubernetes.io/region: dc1
+                topology.kubernetes.io/zone: rack1
+            - name: rack2
+              nodeAffinityLabels:
+                mission-control.datastax.com/role: database
+                topology.kubernetes.io/region: dc1
+                topology.kubernetes.io/zone: rack2
+            - name: rack3
+              nodeAffinityLabels:
+                mission-control.datastax.com/role: database
+                topology.kubernetes.io/region: dc1
+                topology.kubernetes.io/zone: rack3
+        - metadata:
+            name: dc2
+          datacenterName: dc2
+          size: 3
+          racks:
+            - name: rack1
+              nodeAffinityLabels:
+                mission-control.datastax.com/role: database
+                topology.kubernetes.io/region: dc2
+                topology.kubernetes.io/zone: rack1
+            - name: rack2
+              nodeAffinityLabels:
+                mission-control.datastax.com/role: database
+                topology.kubernetes.io/region: dc2
+                topology.kubernetes.io/zone: rack2
+            - name: rack3
+              nodeAffinityLabels:
+                mission-control.datastax.com/role: database
+                topology.kubernetes.io/region: dc2
+                topology.kubernetes.io/zone: rack3
+    medusa:
+      # Reference the MedusaConfiguration created above.
+      medusaConfigurationRef:
+        name: database-backup
+      storageProperties:
+        prefix: two-dcs
+---
+# Data API gateway for dc1 (requires MissionControlCluster dataApi: {} above).
+apiVersion: missioncontrol.datastax.com/v1alpha1
+kind: DataApi
+metadata:
+  name: two-dcs-data-api
+  namespace: database
+spec:
+  cassandraDatacenterRef:
+    name: dc1
+  replicas: 1
+  services:
+    clusterIP:
+      port: 30080

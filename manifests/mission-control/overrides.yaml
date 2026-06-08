@@ -1,0 +1,307 @@
+# Local overrides for `helm install|upgrade ... -f manifests/mission-control/values.yaml -f manifests/mission-control/overrides.yaml`
+#
+# Assumes Helm release name `mission-control` in namespace `mission-control`.
+# If you use another release name, replace `mission-control-minio` in secretKeyRef
+# and in `loki.loki.storage.s3.endpoint` accordingly (`<release>-minio.<namespace>.svc.cluster.local:9000`).
+#
+# Helm replaces whole YAML lists on merge: never specify only part of `schemaConfig.configs` or
+# `loki.*.extraArgs` here without the full entries you need (see loki schema + extraArgs below).
+#
+# Component map (platform / control plane — all pinned to role=platform KinD workers):
+#   ui, client          — Mission Control web UI and API backend
+#   dex                 — OIDC/login (lab: static password user)
+#   aggregator          — Vector aggregator (telemetry fan-in for Loki/Mimir)
+#   k8ssandra-operator  — Reconciles MissionControlCluster → HCD/Cassandra (cass-operator subchart)
+#   replicated          — Replicated/KOTS admin (chart packaging metadata)
+#   kube-state-metrics  — Cluster object metrics for observability
+#   mimir (+ minio)     — Metrics TSDB; embedded MinIO for Mimir/Loki object storage
+#   loki                — Log storage/query (S3 backend → same MinIO)
+#   grafana             — Dashboards over Mimir + Loki (enabled here; off in pinned values.yaml)
+
+# Keep MC operators off database-tagged workers so HCD pods own those nodes.
+allowOperatorsOnDatabaseNodes: false
+
+# Default nodeSelector for chart components that inherit the top-level key.
+nodeSelector:
+  mission-control.datastax.com/role: platform
+
+# ui — Mission Control web UI (port-forward svc/mission-control-ui:8080).
+ui:
+  nodeSelector:
+    mission-control.datastax.com/role: platform
+
+# client — Mission Control API / control-plane services used by the UI and operators.
+client:
+  nodeSelector:
+    mission-control.datastax.com/role: platform
+
+# dex — Authentication (login). Lab uses local static passwords instead of an external IdP.
+dex:
+  nodeSelector:
+    mission-control.datastax.com/role: platform
+  config:
+    enablePasswordDB: true
+    staticPasswords:
+      - email: "mission-control@example.com"
+        hash: "$2y$10$u/B82hcN/2fY1Wtz4YEW9.QblqcAfSWRsvbefvQVlFq8AAuMY7VU2"
+        username: admin
+
+# aggregator — Vector aggregator Deployment; receives agent telemetry and forwards to Loki/Mimir.
+aggregator:
+  nodeSelector:
+    mission-control.datastax.com/role: platform
+
+# k8ssandra-operator — Watches MissionControlCluster CRs; drives Cassandra/HCD + Medusa/Reaper.
+k8ssandra-operator:
+  nodeSelector:
+    mission-control.datastax.com/role: platform
+  cass-operator:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+
+# replicated — Replicated admin component bundled with the commercial chart (local lab metadata).
+replicated:
+  nodeSelector:
+    mission-control.datastax.com/role: platform
+
+# kube-state-metrics — Exposes Kubernetes resource metrics to the observability pipeline.
+kube-state-metrics:
+  nodeSelector:
+    mission-control.datastax.com/role: platform
+
+# mimir — Grafana Mimir metrics stack (distributor, ingester, querier, compactor, etc.).
+# Replicas, retention, and resources come from pinned values.yaml (chart defaults).
+mimir:
+  # Embedded MinIO: S3-compatible store for Mimir blocks and Loki chunks (see loki.storage below).
+  minio:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+    enabled: true
+    buckets:
+      - name: mimir-tsdb
+        policy: none
+        purge: false
+      - name: mimir-ruler
+        policy: none
+        purge: false
+      - name: loki-chunks
+        policy: none
+        purge: false
+      - name: loki-ruler
+        policy: none
+        purge: false
+      - name: loki-admin
+        policy: none
+        purge: false
+  # Mimir microservices (each pinned to platform nodes).
+  distributor:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  ingester:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  querier:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  query_frontend:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  query_scheduler:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  compactor:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  store_gateway:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  alertmanager:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  gateway:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  ruler:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  nginx:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  rollout_operator:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+
+# loki — Log aggregation (scalable mode). Storage uses chart MinIO + TLS between Loki components.
+loki:
+  gateway:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  read:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  write:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  backend:
+    nodeSelector:
+      mission-control.datastax.com/role: platform
+  loki:
+    # Object store config: buckets created by mimir.minio above; creds from mission-control-minio Secret.
+    storage:
+      type: s3
+      bucketNames:
+        chunks: loki-chunks
+        ruler: loki-ruler
+        admin: loki-admin
+      s3:
+        endpoint: mission-control-minio.mission-control.svc.cluster.local:9000
+        accessKeyId: "${ACCESSKEYID}"
+        secretAccessKey: "${SECRETACCESSKEY}"
+        insecure: true
+        region: us-east-1
+        s3ForcePathStyle: true
+    schemaConfig:
+      configs:
+        - from: "2025-06-13"
+          object_store: s3
+          store: tsdb
+          schema: v13
+          index:
+            period: 24h
+            prefix: mc_loki_
+    compactor:
+      retention_enabled: true
+      working_directory: "/var/loki/retention"
+      delete_request_store: s3
+  # read / write / backend — Loki targets; extraEnv injects MinIO keys; extraArgs enable mTLS to gateway.
+  read:
+    extraEnv:
+      - name: ACCESSKEYID
+        valueFrom:
+          secretKeyRef:
+            name: mission-control-minio
+            key: rootUser
+      - name: SECRETACCESSKEY
+        valueFrom:
+          secretKeyRef:
+            name: mission-control-minio
+            key: rootPassword
+    extraArgs:
+      - "-config.expand-env=true"
+      - -boltdb.shipper.index-gateway-client.grpc.tls-enabled=true
+      - -boltdb.shipper.index-gateway-client.grpc.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -boltdb.shipper.index-gateway-client.grpc.tls-server-name=loki-gateway
+      - -compactor.grpc-client.tls-enabled=true
+      - -compactor.grpc-client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -compactor.grpc-client.tls-server-name=loki-gateway
+      - -frontend.grpc-client-config.tls-enabled=true
+      - -frontend.grpc-client-config.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -frontend.grpc-client-config.tls-server-name=loki-gateway
+      - -ingester.client.tls-enabled=true
+      - -ingester.client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -ingester.client.tls-server-name=loki-gateway
+      - -querier.frontend-grpc-client.tls-enabled=true
+      - -querier.frontend-grpc-client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -querier.frontend-grpc-client.tls-server-name=loki-gateway
+      - -querier.scheduler-grpc-client.tls-enabled=true
+      - -querier.scheduler-grpc-client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -querier.scheduler-grpc-client.tls-server-name=loki-gateway
+      - -query-scheduler.grpc-client-config.tls-enabled=true
+      - -query-scheduler.grpc-client-config.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -query-scheduler.grpc-client-config.tls-server-name=loki-gateway
+      - -ruler.client.tls-enabled=true
+      - -ruler.client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -ruler.client.tls-server-name=loki-gateway
+      - -tsdb.shipper.index-gateway-client.grpc.tls-enabled=true
+      - -tsdb.shipper.index-gateway-client.grpc.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -tsdb.shipper.index-gateway-client.grpc.tls-server-name=loki-gateway
+  write:
+    extraEnv:
+      - name: ACCESSKEYID
+        valueFrom:
+          secretKeyRef:
+            name: mission-control-minio
+            key: rootUser
+      - name: SECRETACCESSKEY
+        valueFrom:
+          secretKeyRef:
+            name: mission-control-minio
+            key: rootPassword
+    extraArgs:
+      - "-config.expand-env=true"
+      - -boltdb.shipper.index-gateway-client.grpc.tls-enabled=true
+      - -boltdb.shipper.index-gateway-client.grpc.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -boltdb.shipper.index-gateway-client.grpc.tls-server-name=loki-gateway
+      - -compactor.grpc-client.tls-enabled=true
+      - -compactor.grpc-client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -compactor.grpc-client.tls-server-name=loki-gateway
+      - -frontend.grpc-client-config.tls-enabled=true
+      - -frontend.grpc-client-config.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -frontend.grpc-client-config.tls-server-name=loki-gateway
+      - -ingester.client.tls-enabled=true
+      - -ingester.client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -ingester.client.tls-server-name=loki-gateway
+      - -querier.frontend-grpc-client.tls-enabled=true
+      - -querier.frontend-grpc-client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -ingester.client.tls-server-name=loki-gateway
+      - -querier.scheduler-grpc-client.tls-enabled=true
+      - -querier.scheduler-grpc-client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -ingester.client.tls-server-name=loki-gateway
+      - -query-scheduler.grpc-client-config.tls-enabled=true
+      - -query-scheduler.grpc-client-config.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -ingester.client.tls-server-name=loki-gateway
+      - -ruler.client.tls-enabled=true
+      - -ruler.client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -ingester.client.tls-server-name=loki-gateway
+      - -tsdb.shipper.index-gateway-client.grpc.tls-enabled=true
+      - -tsdb.shipper.index-gateway-client.grpc.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -tsdb.shipper.index-gateway-client.grpc.tls-server-name=loki-gateway
+  backend:
+    extraArgs:
+      - "-config.expand-env=true"
+      - -boltdb.shipper.index-gateway-client.grpc.tls-enabled=true
+      - -boltdb.shipper.index-gateway-client.grpc.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -boltdb.shipper.index-gateway-client.grpc.tls-server-name=loki-gateway
+      - -compactor.grpc-client.tls-enabled=true
+      - -compactor.grpc-client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -compactor.grpc-client.tls-server-name=loki-gateway
+      - -frontend.grpc-client-config.tls-enabled=true
+      - -frontend.grpc-client-config.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -frontend.grpc-client-config.tls-server-name=loki-gateway
+      - -ingester.client.tls-enabled=true
+      - -ingester.client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -ingester.client.tls-server-name=loki-gateway
+      - -querier.frontend-grpc-client.tls-enabled=true
+      - -querier.frontend-grpc-client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -querier.frontend-grpc-client.tls-server-name=loki-gateway
+      - -querier.scheduler-grpc-client.tls-enabled=true
+      - -querier.scheduler-grpc-client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -querier.scheduler-grpc-client.tls-server-name=loki-gateway
+      - -query-scheduler.grpc-client-config.tls-enabled=true
+      - -query-scheduler.grpc-client-config.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -query-scheduler.grpc-client-config.tls-server-name=loki-gateway
+      - -ruler.client.tls-enabled=true
+      - -ruler.client.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -querier.frontend-grpc-client.tls-server-name=loki-gateway
+      - -tsdb.shipper.index-gateway-client.grpc.tls-enabled=true
+      - -tsdb.shipper.index-gateway-client.grpc.tls-ca-path=/tmp/certs/loki/ca.crt
+      - -tsdb.shipper.index-gateway-client.grpc.tls-server-name=loki-gateway
+    extraEnv:
+      - name: ACCESSKEYID
+        valueFrom:
+          secretKeyRef:
+            name: mission-control-minio
+            key: rootUser
+      - name: SECRETACCESSKEY
+        valueFrom:
+          secretKeyRef:
+            name: mission-control-minio
+            key: rootPassword
+
+# grafana — Dashboard UI (optional in upstream values; enabled for this lab).
+# Port-forward svc/mission-control-grafana:3000:80 — see docs/05-observability.md.
+# Pinned values.yaml keeps grafana.enabled: false; datasources (Mimir, Loki) come from the chart.
+grafana:
+  enabled: true
+  nodeSelector:
+    mission-control.datastax.com/role: platform
