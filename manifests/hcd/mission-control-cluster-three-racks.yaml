@@ -81,6 +81,7 @@ spec:
                 topology.kubernetes.io/region: dc1
                 topology.kubernetes.io/zone: rack3
     medusa:
+      # Reference the MedusaConfiguration created above.
       medusaConfigurationRef:
         name: database-backup
       storageProperties:
