@@ -1,0 +1,53 @@
+# cassandra-stress profile for lab observability (single-DC, RF=3 on dc1).
+# Used by three-racks; on minimal (1 node) use cqlstress-lab-rf3-minimal.yaml instead.
+keyspace: stresscql_lab
+
+keyspace_definition: |
+  CREATE KEYSPACE stresscql_lab WITH replication = {'class': 'NetworkTopologyStrategy', 'dc1': 3};
+
+table: typestest
+
+table_definition: |
+  CREATE TABLE typestest (
+        name text,
+        choice boolean,
+        date timestamp,
+        address inet,
+        dbl double,
+        lval bigint,
+        ival int,
+        uid timeuuid,
+        value blob,
+        PRIMARY KEY((name,choice), date, address, dbl, lval, ival, uid)
+  )
+    WITH compaction = { 'class':'LeveledCompactionStrategy' }
+
+columnspec:
+  - name: name
+    size: uniform(1..10)
+    population: uniform(1..10)
+  - name: date
+    cluster: uniform(20..40)
+  - name: lval
+    population: gaussian(1..1000)
+    cluster: uniform(1..4)
+
+insert:
+  partitions: uniform(1..50)
+  batchtype: LOGGED
+  select: uniform(1..10)/10
+
+queries:
+   simple1:
+      cql: select * from typestest where name = ? and choice = ? LIMIT 100
+      fields: samerow
+   range1:
+      cql: select * from typestest where name = ? and choice = ? and date >= ? LIMIT 100
+      fields: multirow
+
+token_range_queries:
+  all_columns_tr_query:
+    columns: '*'
+    page_size: 5000
+  value_tr_query:
+    columns: value

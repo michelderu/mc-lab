@@ -61,6 +61,49 @@ If **Observability** is empty, confirm database pods are Ready and the observabi
 
 ---
 
+## Generate workload (`cassandra-stress`)
+
+HCD ships **`cassandra-stress`** in every Cassandra pod (no extra install). Use it to drive CPU, I/O, and CQL traffic so Mission Control **Observability** and Grafana charts show live data.
+
+Lab profiles in **`scripts/`** use **`NetworkTopologyStrategy`** with replication factor **3** (same convention as [backup/restore](06-backup-restore.md)).
+
+```bash
+set -a && source .env && set +a
+
+POD=$(kubectl get pods -n database \
+  -l "cassandra.datastax.com/cluster=${PROFILE},cassandra.datastax.com/datacenter=dc1" \
+  --field-selector=status.phase=Running \
+  -o jsonpath='{.items[0].metadata.name}')
+
+case "$PROFILE" in
+  two-dcs)     STRESS_PROFILE=scripts/cqlstress-lab-rf3-two-dcs.yaml ;;  # dc1:3, dc2:3
+  three-racks) STRESS_PROFILE=scripts/cqlstress-lab-rf3-dc1.yaml ;;      # dc1:3
+  minimal)     STRESS_PROFILE=scripts/cqlstress-lab-rf3-dc1.yaml ;;    # see note below
+  *) echo "Unknown PROFILE: ${PROFILE}" >&2; exit 1 ;;
+esac
+
+kubectl cp "$STRESS_PROFILE" "database/${POD}:/tmp/cqlstress-lab-rf3.yaml" -c cassandra
+
+DB_USER=$(kubectl get secret superuser -n database -o jsonpath='{.data.username}' | base64 -d)
+DB_PASS=$(kubectl get secret superuser -n database -o jsonpath='{.data.password}' | base64 -d)
+
+kubectl exec -it "$POD" -n database -c cassandra -- \
+  /opt/hcd/resources/cassandra/tools/bin/cassandra-stress user \
+    profile=/tmp/cqlstress-lab-rf3.yaml \
+    "ops(insert=1,simple1=3)" duration=2m -rate threads=4 \
+    -node "${PROFILE}-dc1-service" \
+    -mode native cql3 "user=${DB_USER}" "password=${DB_PASS}" port=9042
+```
+
+- **`duration=2m`** — stop automatically after two minutes (or press **Ctrl+C**).
+- **`ops(insert=1,simple1=3)`** — mixed writes and reads (~25% inserts, ~75% point lookups).
+- Keyspace **`stresscql_lab`** is created with RF **3** per datacenter (`dc1: 3` on **`three-racks`**; `dc1: 3, dc2: 3` on **`two-dcs`**).
+- On **`minimal`** (one Cassandra pod), RF **3** cannot be satisfied — edit `scripts/cqlstress-lab-rf3-dc1.yaml` to `dc1: 1` before copying, or use `./scripts/cqlsh.sh` to create the keyspace manually.
+
+Refresh **Observability** or Grafana after about a minute. For a write-only burst, use `"ops(insert=1)"` instead. More bundled examples live under `/opt/hcd/resources/cassandra/tools/` in the pod.
+
+---
+
 ## Grafana
 
 Grafana ships with the lab install when `grafana.enabled: true` in `overrides.yaml` (default for this repo).
